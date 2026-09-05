@@ -9,262 +9,144 @@ import { getCarById } from './cars';
 
 const TRACK_Y = 1;
 const REVERSE_MAX = 14;
-const BOOST_RADIUS = 9;
-
-const BOOST_CONFIGS = {
-  common: { mult: 1.6, duration: 1.5 },
-  rare:   { mult: 2.0, duration: 2.5 },
-  legendary: { mult: 2.5, duration: 3.0 },
-};
+const BOOST_RADIUS_SQ = 81;
+const CHEST_RADIUS_SQ = 36;
+const COIN_RADIUS_SQ = 25;
+const BOOST_CONFIGS = { common: { mult: 1.6, duration: 1.5 }, rare: { mult: 2, duration: 2.5 }, legendary: { mult: 2.5, duration: 3 } };
 
 export function Car() {
   const groupRef = useRef<THREE.Group>(null);
   const [, get] = useKeyboardControls();
-
   const selectedTrackId = useGameState(s => s.selectedTrackId);
   const selectedCarId = useGameState(s => s.selectedCarId);
-  
+  const boost = useGameState(s => s.boostActive);
   const curve = useMemo(() => getTrackCurve(selectedTrackId), [selectedTrackId]);
   const curveLookup = useMemo(() => buildCurveLookup(selectedTrackId, curve), [selectedTrackId, curve]);
   const trackDef = useMemo(() => TRACKS.find(t => t.id === selectedTrackId) || TRACKS[0], [selectedTrackId]);
   const carDef = useMemo(() => getCarById(selectedCarId), [selectedCarId]);
-
   const velocity = useRef(0);
   const carYaw = useRef(trackDef.startYaw);
   const carPos = useRef(new THREE.Vector3(...trackDef.startPos));
+  const probe = useRef(new THREE.Vector3());
+  const pushDir = useRef(new THREE.Vector3());
+  const finishPos = useRef(new THREE.Vector3(...trackDef.startPos));
+  const behind = useRef(new THREE.Vector3());
+  const idealCamPos = useRef(new THREE.Vector3());
+  const lookAhead = useRef(new THREE.Vector3());
+  const hudTimer = useRef(0);
   const boostEndTime = useRef(0);
   const lapCooldown = useRef(true);
   const hasLeftStart = useRef(false);
 
   useEffect(() => {
-    carPos.current = new THREE.Vector3(...trackDef.startPos);
+    carPos.current.set(...trackDef.startPos);
+    finishPos.current.set(...trackDef.startPos);
     carYaw.current = trackDef.startYaw;
     velocity.current = 0;
     lapCooldown.current = true;
     hasLeftStart.current = false;
-    // Grace period: prevent lap/finish trigger for first 5 seconds
-    const t = setTimeout(() => { lapCooldown.current = false; }, 5000);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => { lapCooldown.current = false; }, 5000);
+    return () => clearTimeout(timer);
   }, [trackDef]);
 
   useFrame((state, delta) => {
     if (!groupRef.current) return;
-
     const { forward, back, left, right } = get();
-    const {
-      setSpeed,
-      lap,
-      setLap,
-      maxLaps,
-      finishGame,
-      boostActive,
-      setBoostActive,
-      setLapFlash,
-      activeBoostTier,
-      setActiveBoostTier,
-      activeChests,
-      collectChest,
-      collectedCoins,
-      collectCoin
-    } = useGameState.getState();
-
+    const store = useGameState.getState();
     const dt = Math.min(delta, 0.05);
-    const effectiveMax = boostActive && activeBoostTier ? carDef.maxSpeed * BOOST_CONFIGS[activeBoostTier].mult : carDef.maxSpeed;
-    const DRAG = carDef.brakeForce * 0.4;
+    const effectiveMax = store.boostActive && store.activeBoostTier ? carDef.maxSpeed * BOOST_CONFIGS[store.activeBoostTier].mult : carDef.maxSpeed;
+    const drag = carDef.brakeForce * 0.4;
 
-    // Acceleration / braking
-    if (forward) {
-      velocity.current = Math.min(velocity.current + carDef.acceleration * dt, effectiveMax);
-    } else if (back) {
-      if (velocity.current > 0) {
-        velocity.current = Math.max(0, velocity.current - carDef.brakeForce * dt);
-      } else {
-        velocity.current = Math.max(-REVERSE_MAX, velocity.current - carDef.acceleration * 0.5 * dt);
-      }
-    } else {
-      if (velocity.current > 0) {
-        velocity.current = Math.max(0, velocity.current - DRAG * dt);
-      } else if (velocity.current < 0) {
-        velocity.current = Math.min(0, velocity.current + DRAG * dt);
-      }
-    }
+    if (forward) velocity.current = Math.min(velocity.current + carDef.acceleration * dt, effectiveMax);
+    else if (back) velocity.current = velocity.current > 0 ? Math.max(0, velocity.current - carDef.brakeForce * dt) : Math.max(-REVERSE_MAX, velocity.current - carDef.acceleration * 0.5 * dt);
+    else if (velocity.current > 0) velocity.current = Math.max(0, velocity.current - drag * dt);
+    else if (velocity.current < 0) velocity.current = Math.min(0, velocity.current + drag * dt);
 
-    // Boost timer
-    if (boostActive && state.clock.getElapsedTime() > boostEndTime.current) {
-      setBoostActive(false);
-    }
+    const now = state.clock.getElapsedTime();
+    if (store.boostActive && now > boostEndTime.current) store.setBoostActive(false);
 
-    setSpeed(Math.abs(velocity.current));
-
-    // Steering — proportional to speed; yaw PERSISTS (no spring-back)
     const speedRatio = Math.abs(velocity.current) / carDef.maxSpeed;
     const steerDir = velocity.current >= 0 ? 1 : -1;
-    if (left)  carYaw.current += carDef.turnSpeed * speedRatio * dt * steerDir;
+    if (left) carYaw.current += carDef.turnSpeed * speedRatio * dt * steerDir;
     if (right) carYaw.current -= carDef.turnSpeed * speedRatio * dt * steerDir;
 
-    // Move in heading direction
-    const newX = carPos.current.x + Math.sin(carYaw.current) * velocity.current * dt;
-    const newZ = carPos.current.z + Math.cos(carYaw.current) * velocity.current * dt;
-
-    // --- Track boundary constraint ---
-    const probe = new THREE.Vector3(newX, 0, newZ);
-    const { point: closest, distance } = closestPointOnCurve(curve, probe, curveLookup);
+    const sinYaw = Math.sin(carYaw.current);
+    const cosYaw = Math.cos(carYaw.current);
+    const newX = carPos.current.x + sinYaw * velocity.current * dt;
+    const newZ = carPos.current.z + cosYaw * velocity.current * dt;
+    probe.current.set(newX, 0, newZ);
+    const { point: closest, distance } = closestPointOnCurve(curve, probe.current, curveLookup);
 
     if (distance > TRACK_HALF_WIDTH) {
-      // Push car back inside the track wall
-      const dir = new THREE.Vector3(newX - closest.x, 0, newZ - closest.z).normalize();
-      carPos.current.x = closest.x + dir.x * (TRACK_HALF_WIDTH - 0.5);
-      carPos.current.z = closest.z + dir.z * (TRACK_HALF_WIDTH - 0.5);
-      // Kill most of the speed on wall impact
+      pushDir.current.set(newX - closest.x, 0, newZ - closest.z).normalize();
+      carPos.current.x = closest.x + pushDir.current.x * (TRACK_HALF_WIDTH - 0.5);
+      carPos.current.z = closest.z + pushDir.current.z * (TRACK_HALF_WIDTH - 0.5);
       velocity.current *= 0.35;
     } else {
       carPos.current.x = newX;
       carPos.current.z = newZ;
     }
     carPos.current.y = TRACK_Y;
-
-    useGameState.getState().setCarPos(carPos.current.x, carPos.current.z);
-
     groupRef.current.position.copy(carPos.current);
     groupRef.current.rotation.set(0, carYaw.current, 0);
 
-    // Boost pad pickup
-    if (!boostActive) {
-      let hitTier: 'common' | 'rare' | 'legendary' | null = null;
-      for (const pad of trackDef.boostPads) {
-        if (carPos.current.distanceTo(new THREE.Vector3(pad[0], TRACK_Y, pad[2])) < BOOST_RADIUS) {
-          hitTier = 'common'; break;
-        }
-      }
-      if (!hitTier && trackDef.rareBoostPads) {
-        for (const pad of trackDef.rareBoostPads) {
-          if (carPos.current.distanceTo(new THREE.Vector3(pad[0], TRACK_Y, pad[2])) < BOOST_RADIUS) {
-            hitTier = 'rare'; break;
-          }
-        }
-      }
-      if (!hitTier && trackDef.legendaryBoostPad) {
-        if (carPos.current.distanceTo(new THREE.Vector3(trackDef.legendaryBoostPad[0], TRACK_Y, trackDef.legendaryBoostPad[2])) < BOOST_RADIUS) {
-          hitTier = 'legendary';
-        }
-      }
-
-      if (hitTier) {
-        setActiveBoostTier(hitTier);
-        setBoostActive(true);
-        boostEndTime.current = state.clock.getElapsedTime() + BOOST_CONFIGS[hitTier].duration;
-      }
+    hudTimer.current += dt;
+    if (hudTimer.current >= 1 / 15) {
+      hudTimer.current = 0;
+      store.setSpeed(Math.abs(velocity.current));
+      store.setCarPos(carPos.current.x, carPos.current.z);
     }
 
-    // Chest collision
+    if (!store.boostActive) {
+      let tier: 'common' | 'rare' | 'legendary' | null = null;
+      for (const pad of trackDef.boostPads) { const dx = carPos.current.x - pad[0], dz = carPos.current.z - pad[2]; if (dx * dx + dz * dz < BOOST_RADIUS_SQ) { tier = 'common'; break; } }
+      if (!tier && trackDef.rareBoostPads) for (const pad of trackDef.rareBoostPads) { const dx = carPos.current.x - pad[0], dz = carPos.current.z - pad[2]; if (dx * dx + dz * dz < BOOST_RADIUS_SQ) { tier = 'rare'; break; } }
+      if (!tier && trackDef.legendaryBoostPad) { const pad = trackDef.legendaryBoostPad; const dx = carPos.current.x - pad[0], dz = carPos.current.z - pad[2]; if (dx * dx + dz * dz < BOOST_RADIUS_SQ) tier = 'legendary'; }
+      if (tier) { store.setActiveBoostTier(tier); store.setBoostActive(true); boostEndTime.current = now + BOOST_CONFIGS[tier].duration; }
+    }
+
     const chestSpots = trackDef.chestSpots || [];
-    for (const chestId of activeChests) {
-      const idx = parseInt(chestId.split('-')[1]);
-      const spot = chestSpots[idx];
+    for (const id of store.activeChests) {
+      const spot = chestSpots[Number(id.slice(6))];
       if (!spot) continue;
-      const dist = carPos.current.distanceTo(new THREE.Vector3(spot[0], TRACK_Y, spot[2]));
-      if (dist < 6) {
-        collectChest(chestId);
-        break;
-      }
+      const dx = carPos.current.x - spot[0], dz = carPos.current.z - spot[2];
+      if (dx * dx + dz * dz < CHEST_RADIUS_SQ) { store.collectChest(id); break; }
     }
 
-    // Coin collision
-    const coinSpotsList = trackDef.coinSpots || [];
-    for (let i = 0; i < coinSpotsList.length; i++) {
-      const coinId = "coin-" + i;
-      if (collectedCoins.includes(coinId)) continue;
-      const spot = coinSpotsList[i];
-      const dist = carPos.current.distanceTo(new THREE.Vector3(spot[0], TRACK_Y, spot[2]));
-      if (dist < 5) {
-        collectCoin(coinId);
-        break;
-      }
+    const coinSpots = trackDef.coinSpots || [];
+    for (let i = 0; i < coinSpots.length; i++) {
+      const id = 'coin-' + i;
+      if (store.collectedCoins.includes(id)) continue;
+      const spot = coinSpots[i];
+      const dx = carPos.current.x - spot[0], dz = carPos.current.z - spot[2];
+      if (dx * dx + dz * dz < COIN_RADIUS_SQ) { store.collectCoin(id); break; }
     }
 
-    // Lap detection
-    const finishPos = new THREE.Vector3(...trackDef.startPos);
-    const distToStart = carPos.current.distanceTo(finishPos);
-
-    // Must leave the start zone before a lap can be counted
-    if (!hasLeftStart.current && distToStart > 35) {
-      hasLeftStart.current = true;
-    }
-
-    const nearFinish = distToStart < 14 && velocity.current > 2 && hasLeftStart.current;
-
-    if (nearFinish && !lapCooldown.current) {
+    const dxStart = carPos.current.x - finishPos.current.x, dzStart = carPos.current.z - finishPos.current.z;
+    const startSq = dxStart * dxStart + dzStart * dzStart;
+    if (!hasLeftStart.current && startSq > 1225) hasLeftStart.current = true;
+    if (startSq < 196 && velocity.current > 2 && hasLeftStart.current && !lapCooldown.current) {
       lapCooldown.current = true;
-      const nextLap = lap + 1;
-      if (nextLap > maxLaps) {
-        finishGame();
-      } else {
-        setLap(nextLap);
-        setLapFlash(true);
-        setTimeout(() => setLapFlash(false), 2000);
-      }
+      const nextLap = store.lap + 1;
+      if (nextLap > store.maxLaps) store.finishGame();
+      else { store.setLap(nextLap); store.setLapFlash(true); setTimeout(() => store.setLapFlash(false), 2000); }
       setTimeout(() => { lapCooldown.current = false; }, 4000);
     }
 
-    // Follow camera — behind the car, lerped smoothly
-    const behind = new THREE.Vector3(
-      -Math.sin(carYaw.current) * 14,
-      6,
-      -Math.cos(carYaw.current) * 14,
-    );
-    const idealCamPos = carPos.current.clone().add(behind);
-    const lookAhead = carPos.current.clone().add(
-      new THREE.Vector3(Math.sin(carYaw.current) * 10, 0, Math.cos(carYaw.current) * 10)
-    );
-    state.camera.position.lerp(idealCamPos, 0.08);
-    state.camera.lookAt(lookAhead);
+    behind.current.set(-sinYaw * 14, 6, -cosYaw * 14);
+    idealCamPos.current.copy(carPos.current).add(behind.current);
+    lookAhead.current.set(carPos.current.x + sinYaw * 10, carPos.current.y, carPos.current.z + cosYaw * 10);
+    state.camera.position.lerp(idealCamPos.current, 0.08);
+    state.camera.lookAt(lookAhead.current);
   });
 
-  const boost = useGameState(s => s.boostActive);
-
-  return (
-    <group ref={groupRef}>
-      {/* Body */}
-      <mesh>
-        <boxGeometry args={[3, 1, 6]} />
-        <meshStandardMaterial color={carDef.bodyColor} emissive="#0f0f1a" roughness={0.2} metalness={0.8} />
-      </mesh>
-      
-      {/* Cockpit */}
-      <mesh position={[0, 0.7, 1]}>
-        <boxGeometry args={[2, 0.5, 2.5]} />
-        <meshStandardMaterial color="#000000" emissive="#000000" roughness={0.1} metalness={0.9} />
-      </mesh>
-
-      {/* Left Wing */}
-      <mesh position={[-1.8, 0.3, -2.5]} rotation={[0, -0.2, 0]}>
-        <boxGeometry args={[1, 0.2, 1.5]} />
-        <meshStandardMaterial color={carDef.bodyColor} emissive="#0f0f1a" roughness={0.2} metalness={0.8} />
-      </mesh>
-
-      {/* Right Wing */}
-      <mesh position={[1.8, 0.3, -2.5]} rotation={[0, 0.2, 0]}>
-        <boxGeometry args={[1, 0.2, 1.5]} />
-        <meshStandardMaterial color={carDef.bodyColor} emissive="#0f0f1a" roughness={0.2} metalness={0.8} />
-      </mesh>
-
-      {/* Neon underside trim */}
-      <mesh position={[0, -0.4, 0]}>
-        <boxGeometry args={[3.2, 0.2, 6.2]} />
-        <meshStandardMaterial color={carDef.trimColor} emissive={carDef.trimColor} emissiveIntensity={2} />
-      </mesh>
-      
-      {/* Engine thruster */}
-      <mesh position={[0, 0, -3.1]}>
-        <boxGeometry args={[2, 0.8, 0.5]} />
-        <meshStandardMaterial
-          color={carDef.thrusterColor}
-          emissive={carDef.thrusterColor}
-          emissiveIntensity={boost ? 5 : 2}
-        />
-      </mesh>
-
-      <pointLight position={[0, -1, -4]} color={carDef.thrusterColor} intensity={boost ? 10 : 3} distance={boost ? 25 : 10} />
-    </group>
-  );
+  return <group ref={groupRef}>
+    <mesh><boxGeometry args={[3, 1, 6]} /><meshStandardMaterial color={carDef.bodyColor} emissive="#0f0f1a" roughness={0.2} metalness={0.8} /></mesh>
+    <mesh position={[0, 0.7, 1]}><boxGeometry args={[2, 0.5, 2.5]} /><meshStandardMaterial color="#000000" roughness={0.1} metalness={0.9} /></mesh>
+    <mesh position={[-1.8, 0.3, -2.5]} rotation={[0, -0.2, 0]}><boxGeometry args={[1, 0.2, 1.5]} /><meshStandardMaterial color={carDef.bodyColor} emissive="#0f0f1a" roughness={0.2} metalness={0.8} /></mesh>
+    <mesh position={[1.8, 0.3, -2.5]} rotation={[0, 0.2, 0]}><boxGeometry args={[1, 0.2, 1.5]} /><meshStandardMaterial color={carDef.bodyColor} emissive="#0f0f1a" roughness={0.2} metalness={0.8} /></mesh>
+    <mesh position={[0, -0.4, 0]}><boxGeometry args={[3.2, 0.2, 6.2]} /><meshStandardMaterial color={carDef.trimColor} emissive={carDef.trimColor} emissiveIntensity={2} /></mesh>
+    <mesh position={[0, 0, -3.1]}><boxGeometry args={[2, 0.8, 0.5]} /><meshStandardMaterial color={carDef.thrusterColor} emissive={carDef.thrusterColor} emissiveIntensity={boost ? 5 : 2} /></mesh>
+    <pointLight position={[0, -1, -4]} color={carDef.thrusterColor} intensity={boost ? 10 : 3} distance={boost ? 25 : 10} />
+  </group>;
 }
