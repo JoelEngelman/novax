@@ -35,17 +35,35 @@ jobs:
         run: |
           node <<'NODE'
           const fs = require('fs');
-          const pkgPath = 'artifacts/3d-game/package.json';
-          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-          for (const section of ['dependencies', 'devDependencies']) {
-            if (!pkg[section]) continue;
-            for (const key of Object.keys(pkg[section])) {
-              if (key.startsWith('@replit/')) delete pkg[section][key];
-              if (key === '@workspace/api-client-react') delete pkg[section][key];
+          const path = require('path');
+
+          function walk(dir) {
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              if (['node_modules', '.git'].includes(entry.name)) continue;
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) walk(full);
+              else if (entry.name === 'package.json') {
+                const pkg = JSON.parse(fs.readFileSync(full, 'utf8'));
+                let changed = false;
+                for (const section of ['dependencies', 'devDependencies', 'peerDependencies', 'optionalDependencies']) {
+                  if (!pkg[section]) continue;
+                  for (const key of Object.keys(pkg[section])) {
+                    if (key.startsWith('@replit/')) {
+                      delete pkg[section][key];
+                      changed = true;
+                    }
+                  }
+                }
+                if (full === 'artifacts/3d-game/package.json') {
+                  delete pkg.dependencies?.['@workspace/api-client-react'];
+                  pkg.name = 'novax';
+                  changed = true;
+                }
+                if (changed) fs.writeFileSync(full, JSON.stringify(pkg, null, 2) + '\n');
+              }
             }
           }
-          pkg.name = 'novax';
-          fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+          walk('.');
 
           const vitePath = 'artifacts/3d-game/vite.config.ts';
           let vite = fs.readFileSync(vitePath, 'utf8');
@@ -68,6 +86,9 @@ jobs:
             ws = ws.replace(/^\s+'@replit\/vite-plugin-runtime-error-modal':.*\n/m, '');
             fs.writeFileSync(wsPath, ws);
           }
+
+          // The original lockfile contains Replit catalog references. Generate a clean GitHub-only lockfile.
+          if (fs.existsSync('pnpm-lock.yaml')) fs.rmSync('pnpm-lock.yaml');
           NODE
 
       - name: Commit imported game to NovaX
