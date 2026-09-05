@@ -27,15 +27,16 @@ export function makeTrackCurve(): THREE.CatmullRomCurve3 {
   return getTrackCurve('neon-circuit');
 }
 
+// Collision lookup is intentionally much smaller than the render geometry.
+// This runs every frame, so keeping it compact is critical for smooth FPS.
 const CURVE_CACHE = new Map<string, THREE.Vector3[]>();
-const LOOKUP_SEGMENTS = 300;
+const LOOKUP_SEGMENTS = 96;
 
 export function buildCurveLookup(trackId: string, curve: THREE.CatmullRomCurve3): THREE.Vector3[] {
-  if (CURVE_CACHE.has(trackId)) return CURVE_CACHE.get(trackId)!;
+  const cached = CURVE_CACHE.get(trackId);
+  if (cached) return cached;
   const pts: THREE.Vector3[] = [];
-  for (let i = 0; i <= LOOKUP_SEGMENTS; i++) {
-    pts.push(curve.getPointAt(i / LOOKUP_SEGMENTS));
-  }
+  for (let i = 0; i <= LOOKUP_SEGMENTS; i++) pts.push(curve.getPointAt(i / LOOKUP_SEGMENTS));
   CURVE_CACHE.set(trackId, pts);
   return pts;
 }
@@ -45,12 +46,21 @@ export function closestPointOnCurve(
   pos: THREE.Vector3,
   lookupTable?: THREE.Vector3[]
 ): { point: THREE.Vector3; distance: number } {
-  const table = lookupTable ?? (() => { const pts: THREE.Vector3[] = []; for (let i=0; i<=LOOKUP_SEGMENTS; i++) pts.push(curve.getPointAt(i/LOOKUP_SEGMENTS)); return pts; })();
-  let best = Infinity;
+  const table = lookupTable ?? buildCurveLookup('default', curve);
+  let bestSq = Infinity;
   let bestPt = table[0];
-  for (const pt of table) {
-    const d = Math.hypot(pos.x - pt.x, pos.z - pt.z);
-    if (d < best) { best = d; bestPt = pt; }
+
+  // Avoid Math.hypot in the hot loop and avoid creating temporary vectors.
+  for (let i = 0; i < table.length; i++) {
+    const pt = table[i];
+    const dx = pos.x - pt.x;
+    const dz = pos.z - pt.z;
+    const dSq = dx * dx + dz * dz;
+    if (dSq < bestSq) {
+      bestSq = dSq;
+      bestPt = pt;
+    }
   }
-  return { point: bestPt, distance: best };
+
+  return { point: bestPt, distance: Math.sqrt(bestSq) };
 }
