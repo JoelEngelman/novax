@@ -87,7 +87,6 @@ jobs:
             fs.writeFileSync(wsPath, ws);
           }
 
-          // The original lockfile contains Replit catalog references. Generate a clean GitHub-only lockfile.
           if (fs.existsSync('pnpm-lock.yaml')) fs.rmSync('pnpm-lock.yaml');
           NODE
 
@@ -110,7 +109,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
