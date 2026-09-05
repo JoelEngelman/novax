@@ -1,4 +1,4 @@
-name: Import NovaX and deploy to GitHub Pages
+name: Build and deploy NovaX
 
 on:
   push:
@@ -22,20 +22,22 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Import the actual Cosmic Racer League game
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event.head_commit.message != 'Import NovaX racing game and remove Replit dependency' }}
         run: |
           git clone --depth 1 https://github.com/JoelEngelman/cosmicracerleague.git /tmp/cosmicracerleague
           find . -mindepth 1 -maxdepth 1 ! -name .git ! -name .github -exec rm -rf {} +
           cp -a /tmp/cosmicracerleague/. .
           rm -rf .git
           rm -f .replit .replitignore replit.md
-          find . -name '.replit' -o -name '.replitignore' | xargs -r rm -f
+          find . -name '.replit' -o -name '.replitignore' -o -name 'replit.md' | xargs -r rm -f
 
-      - name: Remove Replit-only build dependencies and configure Pages base path
+      - name: Remove Replit dependencies and configure GitHub Pages
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event.head_commit.message != 'Import NovaX racing game and remove Replit dependency' }}
         run: |
           node <<'NODE'
           const fs = require('fs');
-          const p = 'artifacts/3d-game/package.json';
-          const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+          const pkgPath = 'artifacts/3d-game/package.json';
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
           for (const section of ['dependencies', 'devDependencies']) {
             if (!pkg[section]) continue;
             for (const key of Object.keys(pkg[section])) {
@@ -43,35 +45,34 @@ jobs:
               if (key === '@workspace/api-client-react') delete pkg[section][key];
             }
           }
-          fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
-          NODE
-
-          node <<'NODE'
-          const fs = require('fs');
-          const p = 'artifacts/3d-game/vite.config.ts';
-          let s = fs.readFileSync(p, 'utf8');
-          s = s.replace(/,\s*base:\s*['"][^'"]*['"]/g, '');
-          s = s.replace(/export default defineConfig\(\{/g, "export default defineConfig({\n  base: '/novax/',");
-          s = s.replace(/\n\s*plugins:\s*\[[\s\S]*?\],\n\n\s*resolve:/, (m) => {
-            const block = m.match(/plugins:\s*\[([\s\S]*?)\]/);
-            if (!block) return m;
-            const kept = block[1].split(',').filter(x => !x.includes('replit')).join(',');
-            return m.replace(block[1], kept);
-          });
-          fs.writeFileSync(p, s);
-          NODE
-
-      - name: Set project metadata
-        run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const p = 'artifacts/3d-game/package.json';
-          const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
           pkg.name = 'novax';
-          fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+
+          const vitePath = 'artifacts/3d-game/vite.config.ts';
+          let vite = fs.readFileSync(vitePath, 'utf8');
+          vite = vite.replace(/export default defineConfig\(\{/g, "export default defineConfig({\n  base: '/novax/',");
+          vite = vite.replace(/\n\s*plugins:\s*\[[\s\S]*?\],\n\n\s*resolve:/, (m) => {
+            const match = m.match(/plugins:\s*\[([\s\S]*?)\]/);
+            if (!match) return m;
+            const kept = match[1].split(',').filter(x => !x.includes('@replit/')).join(',');
+            return m.replace(match[1], kept);
+          });
+          fs.writeFileSync(vitePath, vite);
+
+          const wsPath = 'pnpm-workspace.yaml';
+          if (fs.existsSync(wsPath)) {
+            let ws = fs.readFileSync(wsPath, 'utf8');
+            ws = ws.replace(/^\s*- '@replit\/\*'\n/m, '');
+            ws = ws.replace(/^\s*- stripe-replit-sync\n/m, '');
+            ws = ws.replace(/^\s+'@replit\/vite-plugin-cartographer':.*\n/m, '');
+            ws = ws.replace(/^\s+'@replit\/vite-plugin-dev-banner':.*\n/m, '');
+            ws = ws.replace(/^\s+'@replit\/vite-plugin-runtime-error-modal':.*\n/m, '');
+            fs.writeFileSync(wsPath, ws);
+          }
           NODE
 
       - name: Commit imported game to NovaX
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event.head_commit.message != 'Import NovaX racing game and remove Replit dependency' }}
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
