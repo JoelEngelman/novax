@@ -11,9 +11,7 @@ import Garage from "./pages/Garage";
 const queryClient = new QueryClient();
 
 function AppContent() {
-  // Subscribe only to the screen state. The racing loop updates other store
-  // values frequently and must not cause the entire app tree to reconcile.
-  const state = useGameState(s => s.state);
+  const { state } = useGameState();
 
   return (
     <>
