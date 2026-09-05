@@ -1,0 +1,117 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: leaderboard
+    description: Leaderboard operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /leaderboard:
+    get:
+      operationId: getLeaderboard
+      tags: [leaderboard]
+      summary: Get top leaderboard entries
+      description: Returns the top race times sorted by fastest first
+      responses:
+        "200":
+          description: Leaderboard entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LeaderboardEntry"
+    post:
+      operationId: submitScore
+      tags: [leaderboard]
+      summary: Submit a race score
+      description: Submit a completed race time to the leaderboard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScoreInput"
+      responses:
+        "201":
+          description: Score submitted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeaderboardEntry"
+        "400":
+          description: Invalid input
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    LeaderboardEntry:
+      type: object
+      properties:
+        id:
+          type: integer
+        playerName:
+          type: string
+        raceTimeMs:
+          type: integer
+          description: Race time in milliseconds
+        laps:
+          type: integer
+        track:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - playerName
+        - raceTimeMs
+        - laps
+        - track
+        - createdAt
+    ScoreInput:
+      type: object
+      properties:
+        playerName:
+          type: string
+          minLength: 1
+          maxLength: 20
+        raceTimeMs:
+          type: integer
+          minimum: 1
+        laps:
+          type: integer
+          minimum: 1
+        track:
+          type: string
+          minLength: 1
+      required:
+        - playerName
+        - raceTimeMs
+        - laps
+        - track
